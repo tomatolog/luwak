@@ -1,0 +1,5 @@
+wild: false
+logging:
+  loggers:
+    "uk.co.flax.luwak.server.resources": ERROR
+    "uk.co.flax.luwak.server": ERROR
