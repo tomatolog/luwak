@@ -16,6 +16,13 @@ package uk.co.flax.luwak.server;
  */
 
 import io.dropwizard.Configuration;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 public class LuwakConfiguration extends Configuration {
+	@JsonProperty("wild")
+	private boolean wild = false;
+
+	public boolean IsWild() {
+		return wild;
+	}
 }

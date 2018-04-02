@@ -23,8 +23,14 @@ import uk.co.flax.luwak.presearcher.TermFilteredPresearcher;
 import uk.co.flax.luwak.queryparsers.LuceneQueryParser;
 import uk.co.flax.luwak.server.resources.MatchResource;
 import uk.co.flax.luwak.server.resources.UpdateResource;
+import uk.co.flax.luwak.presearcher.WildcardNGramPresearcherComponent;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class LuwakServer extends Application<LuwakConfiguration> {
+
+    public static final Logger logger = LoggerFactory.getLogger(MatchResource.class);
 
     public static void main(String[] args) throws Exception {
         // If no arguments are given, assume we just want to start up the server
@@ -36,7 +42,13 @@ public class LuwakServer extends Application<LuwakConfiguration> {
 
     @Override
     public void run(LuwakConfiguration luwakConfiguration, Environment environment) throws Exception {
-        Monitor monitor = new Monitor(new LuceneQueryParser("field"), new TermFilteredPresearcher());
+        TermFilteredPresearcher presearcher = new TermFilteredPresearcher();
+        if (luwakConfiguration.IsWild()) {
+            logger.info("wild presearcher");
+            presearcher = new TermFilteredPresearcher(new WildcardNGramPresearcherComponent());
+        }
+        Monitor monitor = new Monitor(new LuceneQueryParser("field"), presearcher);
+        
         environment.lifecycle().manage(new LuwakMonitorManager(monitor));
 
         environment.jersey().register(new MatchResource(monitor));

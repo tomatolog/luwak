@@ -19,6 +19,8 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Iterator;
+import java.util.ArrayList;
 
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.JsonParser;
@@ -30,7 +32,12 @@ import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import uk.co.flax.luwak.*;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public class LuwakMapper extends SimpleModule {
+
+    public static final Logger logger = LoggerFactory.getLogger(LuwakMapper.class);
 
     public static ObjectMapper addMappings(ObjectMapper in) {
         in.registerModule(INSTANCE);
@@ -43,6 +50,7 @@ public class LuwakMapper extends SimpleModule {
         super("LuwakMapper");
         addDeserializer(MonitorQuery.class, new MonitorQueryDeserializer());
         addDeserializer(InputDocument.class, new InputDocumentDeserializer());
+        addDeserializer(DocumentBatch.class, new InputDocumentBatchDeserializer());
         addSerializer(Matches.class, new MatchesSerializer());
     }
 
@@ -52,9 +60,19 @@ public class LuwakMapper extends SimpleModule {
 
         @Override
         public void serialize(Matches dm, JsonGenerator jsonGenerator, SerializerProvider serializerProvider) throws IOException, JsonProcessingException {
-            jsonGenerator.writeStartObject();
             Matches<QueryMatch> documentMatches = (Matches<QueryMatch>) dm;
+
+            jsonGenerator.writeStartObject();
+            jsonGenerator.writeNumberField("took", documentMatches.getSearchTime());
+            jsonGenerator.writeNumberField("took_query_build", documentMatches.getQueryBuildTime());
+            jsonGenerator.writeNumberField("took_search", documentMatches.getSearchTime());
+            jsonGenerator.writeNumberField("took_total", documentMatches.getQueryBuildTime() + documentMatches.getSearchTime());
+            jsonGenerator.writeFieldName("hits");
+            jsonGenerator.writeStartObject();
+            jsonGenerator.writeFieldName("hits");
+            jsonGenerator.writeStartArray();
             for (DocumentMatches<QueryMatch> doc : documentMatches) {
+                jsonGenerator.writeStartObject();
                 jsonGenerator.writeStringField("doc", doc.getDocId());
                 jsonGenerator.writeFieldName("matches");
                 jsonGenerator.writeStartArray();
@@ -62,7 +80,10 @@ public class LuwakMapper extends SimpleModule {
                     jsonGenerator.writeString(qm.getQueryId());
                 }
                 jsonGenerator.writeEndArray();
+                jsonGenerator.writeEndObject();
             }
+            jsonGenerator.writeEndArray();
+            jsonGenerator.writeEndObject();
             jsonGenerator.writeEndObject();
         }
     }
@@ -73,25 +94,56 @@ public class LuwakMapper extends SimpleModule {
         public InputDocument deserialize(JsonParser jsonParser, DeserializationContext deserializationContext) throws IOException, JsonProcessingException {
             String id = null;
             Map<String, String> fields = Collections.emptyMap();
-            while (jsonParser.nextToken() != JsonToken.END_OBJECT) {
-                String fieldname = jsonParser.getCurrentName();
-                switch (fieldname) {
-                    case "id":
-                        id = jsonParser.getText();
-                        break;
-                    case "fields":
-                        fields = readMap(jsonParser);
-                        break;
-                }
-            }
+
             Analyzer analyzer = new StandardAnalyzer();
-            InputDocument.Builder builder = new InputDocument.Builder(id);
-            for (Map.Entry<String, String> entry : fields.entrySet()) {
-                builder.addField(entry.getKey(), entry.getValue(), analyzer);
+            
+            InputDocument doc = null;
+
+            JsonNode node = jsonParser.readValueAsTree();
+            id = node.get("id").asText();
+
+            JsonNode nodeFields = node.get("fields");
+            JsonNode nodeQuery = node.get("query");
+            if (nodeFields!=null) {
+                fields = readMap(nodeFields);
+                doc = readDoc(id, fields, analyzer);
+            } else if (nodeQuery!=null) {
+                fields = readMap(nodeQuery.get("percolate").get("document"));
+                doc = readDoc(id, fields, analyzer);
             }
+
+            logger.info("id: {}, doc: {}, {}", id, fields, doc);
+            return doc;
+        }
+    }
+
+    private static class InputDocumentBatchDeserializer extends JsonDeserializer<DocumentBatch> {
+
+        @Override
+        public DocumentBatch deserialize(JsonParser jsonParser, DeserializationContext deserializationContext) throws IOException, JsonProcessingException {
+            DocumentBatch.Builder builder = new DocumentBatch.Builder();
+            Analyzer analyzer = new StandardAnalyzer();
+
+            JsonNode node = jsonParser.readValueAsTree();
+            Integer id = node.get("id").asInt();
+
+            ArrayList<InputDocument> docs = new ArrayList<InputDocument>();
+
+            JsonNode nodeDocs = node.get("query").get("percolate").get("documents");
+            Iterator<JsonNode> nodeDoc = nodeDocs.iterator();
+            while (nodeDoc.hasNext()) {
+                Map<String, String> fields = readMap(nodeDoc.next());
+                InputDocument doc = readDoc(Integer.toString(id), fields, analyzer);
+                docs.add(doc);
+                id++;
+                logger.info("{}", fields);
+            }
+
+            logger.info("id: {}, docs: {}", id, docs.size());
+
+            builder.addAll(docs);
             return builder.build();
         }
-
     }
 
     private static class MonitorQueryDeserializer extends JsonDeserializer<MonitorQuery> {
@@ -100,31 +152,36 @@ public class LuwakMapper extends SimpleModule {
             String id = null;
             String query = null;
             Map<String, String> metadata = Collections.emptyMap();
-            while (jsonParser.nextToken() != JsonToken.END_OBJECT) {
-                String fieldname = jsonParser.getCurrentName();
-                switch (fieldname) {
-                    case "id":
-                        id = jsonParser.getText();
-                        break;
-                    case "query":
-                        query = jsonParser.getText();
-                        break;
-                    case "metadata":
-                        jsonParser.nextToken();
-                        metadata = readMap(jsonParser);
-                        break;
-                }
+
+            JsonNode node = jsonParser.readValueAsTree();
+            id = node.get("id").asText();
+            if (node.get("query").isObject()) {
+                query = node.get("query").get("ql").asText();
+            } else {
+                query = node.get("query").asText();
             }
+
             return new MonitorQuery(id, query, metadata);
         }
 
     }
 
-    private static Map<String, String> readMap(JsonParser jp) throws IOException {
+    private static Map<String, String> readMap(JsonNode node) throws IOException {
         Map<String, String> metadata = new HashMap<>();
-        while (jp.nextToken() != JsonToken.END_OBJECT) {
-            metadata.put(jp.getCurrentName(), jp.getText());
-        }
+
+        Iterator<Map.Entry<String, JsonNode>> children = node.fields();
+        while (children.hasNext()) {
+            Map.Entry<String, JsonNode> entry = (Map.Entry<String, JsonNode>) children.next();
+            metadata.put(entry.getKey(), entry.getValue().asText());
+        }        
         return metadata;
+    }
+
+    private static InputDocument readDoc(String id, Map<String, String> fields, Analyzer analyzer) {
+        InputDocument.Builder builder = new InputDocument.Builder(id);
+        for (Map.Entry<String, String> entry : fields.entrySet()) {
+            builder.addField(entry.getKey(), entry.getValue(), analyzer);
+        }
+        return builder.build();
     }
 }
